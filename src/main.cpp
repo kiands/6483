@@ -5,6 +5,7 @@
 #include "drivers/stm32f429i_discovery_ts.h"
 #include <iostream>
 #include <vector>
+#include <string>
 #include <cmath>
 
 volatile int TouchCount = 0;
@@ -41,6 +42,8 @@ float calculateDTWDistance(const GyroDataSet& a, const GyroDataSet& b) {
 
     return dtw[n][m];
 }
+
+std::string UnlockStatus = "...";
 
 float similarity = 0.00;
 
@@ -79,6 +82,17 @@ LCD_DISCO_F429ZI lcd;
 
 // 初始化LED引脚
 DigitalOut led(LED1);
+
+bool reset = false;
+// 初始化用户按钮（用于重置状态）
+DigitalIn userButton(USER_BUTTON);
+// 用户按钮中断
+InterruptIn buttonInterrupt(USER_BUTTON);
+
+void buttonPressedCallback()
+{
+    reset = true;
+}
 
 GyroData gyro_thread() {
     // Setup the spi for 8 bit data, high steady state clock,
@@ -138,21 +152,23 @@ bool isTouchEnded() {
 }
 
 int main() {
+    buttonInterrupt.rise(&buttonPressedCallback); // // 设置上升沿中断回调函数
 
     // int16_t raw_gz = gyro_thread();
     // 初始化LCD
     lcd.Clear(LCD_COLOR_WHITE);
     lcd.SetBackColor(LCD_COLOR_WHITE);
     lcd.SetTextColor(LCD_COLOR_BLACK);
-    lcd.SetFont(&Font24);
+    lcd.SetFont(&Font20);
 
     // 转换整数和浮点数为字符串
     char buffer1[32];
     char buffer2[32];
+    char buffer3[32];
     // sprintf(buffer, "Integer: %d", integer_value);
 
     // 在屏幕上显示整数
-    uint16_t x = 0;
+    uint16_t x = 20;
     uint16_t y = 0;
     // lcd.DisplayStringAt(x, y, (uint8_t *)buffer, LEFT_MODE);
     // 转换浮点数为字符串（保留两位小数）
@@ -175,11 +191,22 @@ int main() {
     BSP_TS_Init(lcd.GetXSize(), lcd.GetYSize());
 
     while (1) {
-        sprintf(buffer1, "Integer: %d", TouchCount);
-        sprintf(buffer2, "Float: %2.f", similarity);
+        if (reset == true) {
+            isRecording = false;
+            TouchCount = 0; // 当按键被按下时，将计数变量count设为0
+            similarity = 0.00;
+            GyroDataSet data1;
+            GyroDataSet data2;
+            UnlockStatus = "...";
+            reset = false;
+        }
+
+        sprintf(buffer1, "TouchCount: %d", TouchCount);
+        sprintf(buffer2, "Similarity: %2.f", similarity);
+        sprintf(buffer3, "Unlocked: %s", UnlockStatus.c_str());
         BSP_TS_GetState(&ts_state);
 
-        if (ts_state.TouchDetected && isTouchEnded()) {
+        if (TouchCount < 4 && ts_state.TouchDetected && isTouchEnded()) {
             isRecording = !isRecording; // Switcher
             TouchCount = TouchCount + 1;
         }
@@ -191,18 +218,24 @@ int main() {
             } else if (TouchCount == 3) {
                 data2.push_back(gyro_thread());
             }
-            ThisThread::sleep_for(20);
+            ThisThread::sleep_for(25);
         } else {
             led = 0;
         }
 
         if (TouchCount == 4) {
             similarity = calculateDTWDistance(data1, data2);
+            if (similarity < 60) {
+                UnlockStatus = "YES";
+            } else {
+                UnlockStatus = "NO ";
+            }
         }
 
         // ThisThread::sleep_for(1s);
         lcd.DisplayStringAt(x, 10, (uint8_t *)buffer1, LEFT_MODE);
         lcd.DisplayStringAt(x, 35, (uint8_t *)buffer2, LEFT_MODE);
+        lcd.DisplayStringAt(x, 60, (uint8_t *)buffer3, LEFT_MODE);
     }
 
 }
