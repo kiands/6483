@@ -8,8 +8,25 @@
 #include <string>
 #include <cmath>
 
+/* This defines the recording/calculating/comparaing status. Increase by 1 after each TouchScreen event, max is 4.
+0 = initial status, not recording.
+1 = recording round 1.
+2 = pause, not recording.
+3 = recording round 2.
+4 = calculate, not recording.
+*/
 volatile int TouchCount = 0;
 
+// Indicator that will be displayed to inform user about the unlock status. `...` is the original status.
+std::string UnlockStatus = "...";
+// The initial threshold for define success or fail. In the main function, threshold will be dynamic according to the size of data1.
+int threshold = 0;
+// Similarity, will be compared with threshold.
+float similarity = 0.00;
+
+volatile bool isRecording = false;
+
+// The data structure used to store x/y/z axis data.
 struct GyroData {
     float x;
     float y;
@@ -20,9 +37,11 @@ struct GyroData {
 
 using GyroDataSet = std::vector<GyroData>;
 
+// Initialize 2 instances. `data1` is used to store the reference gesture, `data2` is used to store the gesture that needs to be compared.
 GyroDataSet data1;
 GyroDataSet data2;
 
+// The two functions are used to calculate the original similarity of data1 and data2.
 float euclideanDistance(const GyroData& a, const GyroData& b) {
     return std::sqrt(std::pow(a.x - b.x, 2) + std::pow(a.y - b.y, 2) + std::pow(a.z - b.z, 2));
 }
@@ -43,13 +62,7 @@ float calculateDTWDistance(const GyroDataSet& a, const GyroDataSet& b) {
     return dtw[n][m];
 }
 
-std::string UnlockStatus = "...";
-
-float similarity = 0.00;
-
-volatile bool isRecording = false;
-
-// SPI模式读取陀螺仪
+// Initialize gyroscope with SPI mode.
 SPI spi(PF_9, PF_8, PF_7,PC_1,use_gpio_ssel); // mosi, miso, sclk, cs
 
 #define OUT_X_L 0x28
@@ -73,26 +86,6 @@ EventFlags flags;
 void spi_cb(int event){
   flags.set(SPI_FLAG);
 };
-
-// 初始化触摸屏
-TS_StateTypeDef ts_state;
-
-// 初始化LCD
-LCD_DISCO_F429ZI lcd;
-
-// 初始化LED引脚
-DigitalOut led(LED1);
-
-bool reset = false;
-// 初始化用户按钮（用于重置状态）
-DigitalIn userButton(USER_BUTTON);
-// 用户按钮中断
-InterruptIn buttonInterrupt(USER_BUTTON);
-
-void buttonPressedCallback()
-{
-    reset = true;
-}
 
 GyroData gyro_thread() {
     // Setup the spi for 8 bit data, high steady state clock,
@@ -144,40 +137,51 @@ GyroData gyro_thread() {
     return gyroSample;
 }
 
+// Peripherals used to achieve better UX.
+DigitalOut led(LED1); // Initialize LED. When recording, it will be on, else will be off.
+DigitalIn userButton(USER_BUTTON); // Initialize UserButton for resetting the status
+InterruptIn buttonInterrupt(USER_BUTTON); // UserButton interrupt.
+TS_StateTypeDef ts_state; // Initialize TouchScreen
+LCD_DISCO_F429ZI lcd; // Initialize LCD
+
+bool reset = false; // Reset toggle. The UserButton interrupt will set this to be true and the reset related code will take effect in main function.
+bool retry = false; // Unsuccessful unlock retry toggle.
+
+// The UserButton pressed event callback.
+void buttonPressedCallback()
+{
+    reset = true;
+}
+
+// TouchScreen event filter to avoid multiple counts, very important
 bool isTouchEnded() {
     TS_StateTypeDef currentState;
-    ThisThread::sleep_for(50ms); // 等待一段时间，以确保手指离开触摸屏
+    ThisThread::sleep_for(50ms); // Wait some time to make sure that finger has left.
     BSP_TS_GetState(&currentState);
     return !currentState.TouchDetected;
 }
 
+// finally, main function starts!
 int main() {
-    buttonInterrupt.rise(&buttonPressedCallback); // // 设置上升沿中断回调函数
+    buttonInterrupt.rise(&buttonPressedCallback); // Set the rising edge interrupt callback function.
 
     // int16_t raw_gz = gyro_thread();
-    // 初始化LCD
+    // Initialize LCD display.
     lcd.Clear(LCD_COLOR_WHITE);
     lcd.SetBackColor(LCD_COLOR_WHITE);
     lcd.SetTextColor(LCD_COLOR_BLACK);
     lcd.SetFont(&Font20);
 
-    // 转换整数和浮点数为字符串
+    // Convert contents we want to display to string.
     char buffer1[32];
     char buffer2[32];
     char buffer3[32];
-    // sprintf(buffer, "Integer: %d", integer_value);
+    char buffer4[32];
+    char buffer5[32];
+    char buffer6[32];
 
-    // 在屏幕上显示整数
     uint16_t x = 20;
     uint16_t y = 0;
-    // lcd.DisplayStringAt(x, y, (uint8_t *)buffer, LEFT_MODE);
-    // 转换浮点数为字符串（保留两位小数）
-    // 小数：%2.f
-    // sprintf(buffer, "Float: %2.f", similarity);
-
-    // 在屏幕上显示浮点数
-    // y += lcd.GetFont()->Height;
-    // lcd.DisplayStringAt(x, y, (uint8_t *)buffer, LEFT_MODE);
 
     // Gyro thread
     // 创建线程对象
@@ -185,32 +189,53 @@ int main() {
     // 启动线程，执行external_function
     // thread.start(gyro_thread);
 
-    // Initialize LCD and touchscreen
-    // BSP_LCD_Init();
-    // BSP_TS_Init(BSP_LCD_GetXSize(), BSP_LCD_GetYSize());
     BSP_TS_Init(lcd.GetXSize(), lcd.GetYSize());
 
+    // Indicator Variables
+    int int_size_data1 = 0; // Length of data1.
+    float ratio = 0.00; // The length ratio of data2 when compared to data1.
+
     while (1) {
-        if (reset == true) {
+        if (reset == true && retry == false) { // When we need to reset and don't deed to retry
+            lcd.Clear(LCD_COLOR_WHITE); // clear LCD
+            data1.clear();
+            data2.clear();
             isRecording = false;
-            TouchCount = 0; // 当按键被按下时，将计数变量count设为0
+            TouchCount = 0; // for this situation, TouchCount should be 0
             similarity = 0.00;
-            GyroDataSet data1;
-            GyroDataSet data2;
+            int_size_data1 = 0;
+            ratio = 0.00;
             UnlockStatus = "...";
             reset = false;
+            threshold = 0;
+        } else if (reset == true && retry == true){
+            lcd.Clear(LCD_COLOR_WHITE); // clear LCD
+            // Reserve data 1 and clear data2.
+            data2.clear();
+            isRecording = false;
+            TouchCount = 2; // Directly jump to 2 (before round2 start).
+            similarity = 0.00;
+            ratio = 0.00;
+            UnlockStatus = "...";
+            reset = false;
+            retry = false;
         }
 
         sprintf(buffer1, "TouchCount: %d", TouchCount);
-        sprintf(buffer2, "Similarity: %2.f", similarity);
+        sprintf(buffer2, "Similarity: %d", static_cast<int>(similarity));
         sprintf(buffer3, "Unlocked: %s", UnlockStatus.c_str());
+        sprintf(buffer4, "Len_data1: %d", int_size_data1);
+        sprintf(buffer5, "Ratio: %.2f", ratio);
+        sprintf(buffer6, "Threshold: %d", threshold);
         BSP_TS_GetState(&ts_state);
 
+        // This part prevents TouchCount from increasing after reaching 4.
         if (TouchCount < 4 && ts_state.TouchDetected && isTouchEnded()) {
-            isRecording = !isRecording; // Switcher
+            isRecording = !isRecording; // Recording switcher.
             TouchCount = TouchCount + 1;
         }
 
+        // This part defines whether push data into data1 or data2.
         if (isRecording) {
             led = 1;
             if (TouchCount == 1) {
@@ -223,19 +248,34 @@ int main() {
             led = 0;
         }
 
+        // The decisions will be made in this part.
         if (TouchCount == 4) {
             similarity = calculateDTWDistance(data1, data2);
-            if (similarity < 60) {
-                UnlockStatus = "YES";
+            size_t size_data1 = data1.size(); // Calculate size of data1
+            size_t size_data2 = data2.size(); // Calculate size of data2
+            int_size_data1 = static_cast<int>(size_data1);
+            ratio = static_cast<float>(size_data2) / static_cast<float>(size_data1);
+            // Standard: length of data1 = 100, threshold is 90.
+            threshold = static_cast<int>((static_cast<float>(int_size_data1) / 100.0f) * 90.0f);
+            if (ratio < 0.75 || ratio > 1.25) { // When data1 and data2 have too big length difference, report error and set the process to retry.
+                UnlockStatus = "ERR";
+                retry = true;
             } else {
-                UnlockStatus = "NO ";
+                if (similarity < threshold) { // When `similarity`(euclidean distance) is within threshold, report YES.
+                    UnlockStatus = "YES";
+                } else { // When `similarity`(euclidean distance) exceeds threshold, report YES.
+                    UnlockStatus = "NO ";
+                    retry = true;
+                }
             }
         }
 
-        // ThisThread::sleep_for(1s);
         lcd.DisplayStringAt(x, 10, (uint8_t *)buffer1, LEFT_MODE);
         lcd.DisplayStringAt(x, 35, (uint8_t *)buffer2, LEFT_MODE);
         lcd.DisplayStringAt(x, 60, (uint8_t *)buffer3, LEFT_MODE);
+        lcd.DisplayStringAt(x, 85, (uint8_t *)buffer4, LEFT_MODE);
+        lcd.DisplayStringAt(x, 110, (uint8_t *)buffer5, LEFT_MODE);
+        lcd.DisplayStringAt(x, 135, (uint8_t *)buffer6, LEFT_MODE);
     }
 
 }
