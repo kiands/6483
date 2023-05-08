@@ -7,6 +7,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <deque>
 
 /* This defines the recording/calculating/comparaing status. Increase by 1 after each TouchScreen event, max is 4.
 0 = initial status, not recording.
@@ -87,6 +88,10 @@ void spi_cb(int event){
   flags.set(SPI_FLAG);
 };
 
+const int FILTER_WINDOW_SIZE = 5; // 滤波窗口的大小
+std::deque<GyroData> filter_window; // 存储最新的陀螺仪数据样本的队列
+
+// Get unfiltered gyro data.
 GyroData gyro_thread() {
     // Setup the spi for 8 bit data, high steady state clock,
     // second edge capture, with a 1MHz clock rate
@@ -135,6 +140,37 @@ GyroData gyro_thread() {
     // data2.push_back(gyroSample);
     // ThisThread::sleep_for(100);
     return gyroSample;
+}
+
+// Filter.
+GyroData gyro_thread_filtered() {
+    GyroData raw_sample = gyro_thread(); // 获取原始陀螺仪数据
+
+    // 将原始样本添加到滤波器窗口
+    filter_window.push_back(raw_sample);
+
+    // 如果窗口大小超过FILTER_WINDOW_SIZE，则删除最旧的样本
+    if (filter_window.size() > FILTER_WINDOW_SIZE) {
+        filter_window.pop_front();
+    }
+
+    // 计算窗口中所有样本的平均值
+    float sum_gx = 0;
+    float sum_gy = 0;
+    float sum_gz = 0;
+    for (const auto &sample : filter_window) {
+        sum_gx += sample.x;
+        sum_gy += sample.y;
+        sum_gz += sample.z;
+    }
+
+    // 计算平均值
+    float avg_gx = sum_gx / filter_window.size();
+    float avg_gy = sum_gy / filter_window.size();
+    float avg_gz = sum_gz / filter_window.size();
+
+    // 返回滤波后的陀螺仪数据
+    return GyroData(avg_gx, avg_gy, avg_gz);
 }
 
 // Peripherals used to achieve better UX.
@@ -239,13 +275,15 @@ int main() {
         if (isRecording) {
             led = 1;
             if (TouchCount == 1) {
-                data1.push_back(gyro_thread());
+                data1.push_back(gyro_thread_filtered());
             } else if (TouchCount == 3) {
-                data2.push_back(gyro_thread());
+                data2.push_back(gyro_thread_filtered());
             }
             ThisThread::sleep_for(25);
         } else {
             led = 0;
+            // Clear filter_windows after each completed recording.
+            filter_window.clear();
         }
 
         // The decisions will be made in this part.
@@ -255,8 +293,8 @@ int main() {
             size_t size_data2 = data2.size(); // Calculate size of data2
             int_size_data1 = static_cast<int>(size_data1);
             ratio = static_cast<float>(size_data2) / static_cast<float>(size_data1);
-            // Standard: length of data1 = 100, threshold is 90.
-            threshold = static_cast<int>((static_cast<float>(int_size_data1) / 100.0f) * 90.0f);
+            // Standard: length of data1 = 100, threshold is 50.
+            threshold = static_cast<int>((static_cast<float>(int_size_data1) / 100.0f) * 60.0f);
             if (ratio < 0.75 || ratio > 1.25) { // When data1 and data2 have too big length difference, report error and set the process to retry.
                 UnlockStatus = "ERR";
                 retry = true;
