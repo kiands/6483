@@ -17,6 +17,7 @@
 4 = calculate, not recording.
 */
 volatile int TouchCount = 0;
+std::string guide = "...";
 
 // Indicator that will be displayed to inform user about the unlock status. `...` is the original status.
 std::string UnlockStatus = "...";
@@ -232,6 +233,18 @@ int main() {
     float ratio = 0.00; // The length ratio of data2 when compared to data1.
 
     while (1) {
+        if (TouchCount == 0) {
+            guide = "WAIT1st";
+        } else if (TouchCount == 1) {
+            guide = "Rec_1st";
+        } else if (TouchCount == 2) {
+            guide = "WAIT2nd";
+        } else if (TouchCount == 3) {
+            guide = "Rec_2nd";
+        } else if (TouchCount == 4) {
+            guide = "FResult";
+        }
+
         if (reset == true && retry == false) { // When we need to reset and don't deed to retry
             lcd.Clear(LCD_COLOR_WHITE); // clear LCD
             data1.clear();
@@ -257,8 +270,9 @@ int main() {
             retry = false;
         }
 
-        sprintf(buffer1, "TouchCount: %d", TouchCount);
-        sprintf(buffer2, "Similarity: %d", static_cast<int>(similarity));
+        // sprintf(buffer1, "TouchCount: %d", TouchCount);
+        sprintf(buffer1, "Guide: %s", guide.c_str());
+        sprintf(buffer2, "Distance: %d", static_cast<int>(similarity));
         sprintf(buffer3, "Unlocked: %s", UnlockStatus.c_str());
         sprintf(buffer4, "Len_data1: %d", int_size_data1);
         sprintf(buffer5, "Ratio: %.2f", ratio);
