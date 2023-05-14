@@ -1,6 +1,5 @@
 #include "mbed.h"
 #include "rtos/Thread.h"
-// #include "drivers/stm32f429i_discovery_lcd.h"
 #include "drivers/LCD_DISCO_F429ZI.h"
 #include "drivers/stm32f429i_discovery_ts.h"
 #include <iostream>
@@ -17,15 +16,15 @@
 4 = calculate, not recording.
 */
 volatile int TouchCount = 0;
+// Initial status indicator, will be changed in main().
 std::string guide = "...";
-
 // Indicator that will be displayed to inform user about the unlock status. `...` is the original status.
 std::string UnlockStatus = "...";
 // The initial threshold for define success or fail. In the main function, threshold will be dynamic according to the size of data1.
 int threshold = 0;
 // Similarity, will be compared with threshold.
 float similarity = 0.00;
-
+// [important] Toggle variable of sequence recording.
 volatile bool isRecording = false;
 
 // The data structure used to store x/y/z axis data.
@@ -43,12 +42,13 @@ using GyroDataSet = std::vector<GyroData>;
 GyroDataSet data1;
 GyroDataSet data2;
 
-// The two functions are used to calculate the original similarity of data1 and data2.
-float euclideanDistance(const GyroData& a, const GyroData& b) {
+// [important] These two functions are used to calculate the original `similarity` of data1 and data2.
+float euclidean_distance(const GyroData& a, const GyroData& b) {
     return std::sqrt(std::pow(a.x - b.x, 2) + std::pow(a.y - b.y, 2) + std::pow(a.z - b.z, 2));
 }
 
-float calculateDTWDistance(const GyroDataSet& a, const GyroDataSet& b) {
+// Use simple dynamic programming concept to improve robustness.
+float calculate_DTW_distance(const GyroDataSet& a, const GyroDataSet& b) {
     int n = a.size();
     int m = b.size();
     std::vector<std::vector<float>> dtw(n + 1, std::vector<float>(m + 1, std::numeric_limits<float>::infinity()));
@@ -56,7 +56,7 @@ float calculateDTWDistance(const GyroDataSet& a, const GyroDataSet& b) {
 
     for (int i = 1; i <= n; ++i) {
         for (int j = 1; j <= m; ++j) {
-                        float cost = euclideanDistance(a[i - 1], b[j - 1]);
+                        float cost = euclidean_distance(a[i - 1], b[j - 1]);
             dtw[i][j] = cost + std::min({dtw[i - 1][j], dtw[i][j - 1], dtw[i - 1][j - 1]});
         }
     }
@@ -64,6 +64,7 @@ float calculateDTWDistance(const GyroDataSet& a, const GyroDataSet& b) {
     return dtw[n][m];
 }
 
+// [important] Encapsulation of gyro scope read out.
 // Initialize gyroscope with SPI mode.
 SPI spi(PF_9, PF_8, PF_7,PC_1,use_gpio_ssel); // mosi, miso, sclk, cs
 
@@ -88,9 +89,6 @@ EventFlags flags;
 void spi_cb(int event){
   flags.set(SPI_FLAG);
 };
-
-const int FILTER_WINDOW_SIZE = 5; // 滤波窗口的大小
-std::deque<GyroData> filter_window; // 存储最新的陀螺仪数据样本的队列
 
 // Get unfiltered gyro data.
 GyroData gyro_thread() {
@@ -143,19 +141,22 @@ GyroData gyro_thread() {
     return gyroSample;
 }
 
-// Filter.
+// The previous codes are encapsulation of gyroscope reading.
+// [important] Now we use a simple sliding window filter to denoise.
+const int FILTER_WINDOW_SIZE = 5; // The window size.
+std::deque<GyroData> filter_window; // Store a queue of 5 newest X,Y,Z data points.
+// Filter function based on previous read out function.
 GyroData gyro_thread_filtered() {
-    GyroData raw_sample = gyro_thread(); // 获取原始陀螺仪数据
+    GyroData raw_sample = gyro_thread(); // Call the original read out funciton.
 
-    // 将原始样本添加到滤波器窗口
-    filter_window.push_back(raw_sample);
+    filter_window.push_back(raw_sample); // Add the original data into filter window.
 
-    // 如果窗口大小超过FILTER_WINDOW_SIZE，则删除最旧的样本
+    // If the window size will be larger than max limit, pop the oldest sample.
     if (filter_window.size() > FILTER_WINDOW_SIZE) {
         filter_window.pop_front();
     }
 
-    // 计算窗口中所有样本的平均值
+    // Calculate the average of all samples in the window.
     float sum_gx = 0;
     float sum_gy = 0;
     float sum_gz = 0;
@@ -165,21 +166,21 @@ GyroData gyro_thread_filtered() {
         sum_gz += sample.z;
     }
 
-    // 计算平均值
+    // Calculate average one by one.
     float avg_gx = sum_gx / filter_window.size();
     float avg_gy = sum_gy / filter_window.size();
     float avg_gz = sum_gz / filter_window.size();
 
-    // 返回滤波后的陀螺仪数据
+    // Return filtered data.
     return GyroData(avg_gx, avg_gy, avg_gz);
 }
 
 // Peripherals used to achieve better UX.
 DigitalOut led(LED1); // Initialize LED. When recording, it will be on, else will be off.
-DigitalIn userButton(USER_BUTTON); // Initialize UserButton for resetting the status
+DigitalIn userButton(USER_BUTTON); // Initialize UserButton for resetting the status.
 InterruptIn buttonInterrupt(USER_BUTTON); // UserButton interrupt.
-TS_StateTypeDef ts_state; // Initialize TouchScreen
-LCD_DISCO_F429ZI lcd; // Initialize LCD
+TS_StateTypeDef ts_state; // Initialize TouchScreen.
+LCD_DISCO_F429ZI lcd; // Initialize LCD.
 
 bool reset = false; // Reset toggle. The UserButton interrupt will set this to be true and the reset related code will take effect in main function.
 bool retry = false; // Unsuccessful unlock retry toggle.
@@ -190,7 +191,7 @@ void buttonPressedCallback()
     reset = true;
 }
 
-// TouchScreen event filter to avoid multiple counts, very important
+// [important] TouchScreen event filter to avoid multiple counts.
 bool isTouchEnded() {
     TS_StateTypeDef currentState;
     ThisThread::sleep_for(50ms); // Wait some time to make sure that finger has left.
@@ -198,11 +199,10 @@ bool isTouchEnded() {
     return !currentState.TouchDetected;
 }
 
-// finally, main function starts!
+// Finally, main function starts!
 int main() {
-    buttonInterrupt.rise(&buttonPressedCallback); // Set the rising edge interrupt callback function.
+    buttonInterrupt.rise(&buttonPressedCallback); // Set the rising edge interrupt callback function to respond to user button press.
 
-    // int16_t raw_gz = gyro_thread();
     // Initialize LCD display.
     lcd.Clear(LCD_COLOR_WHITE);
     lcd.SetBackColor(LCD_COLOR_WHITE);
@@ -217,22 +217,18 @@ int main() {
     char buffer5[32];
     char buffer6[32];
 
+    // Variables for displaying text.
     uint16_t x = 20;
     uint16_t y = 0;
 
-    // Gyro thread
-    // 创建线程对象
-    // Thread thread;
-    // 启动线程，执行external_function
-    // thread.start(gyro_thread);
-
-    BSP_TS_Init(lcd.GetXSize(), lcd.GetYSize());
+    BSP_TS_Init(lcd.GetXSize(), lcd.GetYSize()); // This is about the touch event responding area.
 
     // Indicator Variables
     int int_size_data1 = 0; // Length of data1.
     float ratio = 0.00; // The length ratio of data2 when compared to data1.
 
     while (1) {
+        // Here, we will override the first line displayed on the screen to guide the user according to TouchCount.
         if (TouchCount == 0) {
             guide = "WAIT1st";
         } else if (TouchCount == 1) {
@@ -245,6 +241,7 @@ int main() {
             guide = "FResult";
         }
 
+        // This if-else handles the things after user button is pressed.
         if (reset == true && retry == false) { // When we need to reset and don't deed to retry
             lcd.Clear(LCD_COLOR_WHITE); // clear LCD
             data1.clear();
@@ -270,7 +267,7 @@ int main() {
             retry = false;
         }
 
-        // sprintf(buffer1, "TouchCount: %d", TouchCount);
+        // These are about screen printing.
         sprintf(buffer1, "Guide: %s", guide.c_str());
         sprintf(buffer2, "Distance: %d", static_cast<int>(similarity));
         sprintf(buffer3, "Unlocked: %s", UnlockStatus.c_str());
@@ -287,28 +284,28 @@ int main() {
 
         // This part defines whether push data into data1 or data2.
         if (isRecording) {
-            led = 1;
+            led = 1; // When recording, the LED will be on.
             if (TouchCount == 1) {
-                data1.push_back(gyro_thread_filtered());
+                data1.push_back(gyro_thread_filtered()); // Round1
             } else if (TouchCount == 3) {
-                data2.push_back(gyro_thread_filtered());
+                data2.push_back(gyro_thread_filtered()); // round2
             }
-            ThisThread::sleep_for(25);
+            ThisThread::sleep_for(25); // [important] Control the recording frequency.
         } else {
-            led = 0;
-            // Clear filter_windows after each completed recording.
-            filter_window.clear();
+            led = 0; // When not recording, the LED will be off.
+            filter_window.clear(); // [important] Clear filter_windows after each completed recording.
         }
 
         // The decisions will be made in this part.
         if (TouchCount == 4) {
-            similarity = calculateDTWDistance(data1, data2);
+            similarity = calculate_DTW_distance(data1, data2);
             size_t size_data1 = data1.size(); // Calculate size of data1
             size_t size_data2 = data2.size(); // Calculate size of data2
             int_size_data1 = static_cast<int>(size_data1);
             ratio = static_cast<float>(size_data2) / static_cast<float>(size_data1);
-            // Standard: length of data1 = 100, threshold is 50.
-            threshold = static_cast<int>((static_cast<float>(int_size_data1) / 100.0f) * 60.0f);
+            // Standard: length of data1 = 100, threshold is 75.
+            threshold = static_cast<int>((static_cast<float>(int_size_data1) / 100.0f) * 75.0f);
+            // Length ratio is used to prevent attacks like brute force or concepts similar to `hash collision`.
             if (ratio < 0.75 || ratio > 1.25) { // When data1 and data2 have too big length difference, report error and set the process to retry.
                 UnlockStatus = "ERR";
                 retry = true;
@@ -322,6 +319,7 @@ int main() {
             }
         }
 
+        // Display text.
         lcd.DisplayStringAt(x, 10, (uint8_t *)buffer1, LEFT_MODE);
         lcd.DisplayStringAt(x, 35, (uint8_t *)buffer2, LEFT_MODE);
         lcd.DisplayStringAt(x, 60, (uint8_t *)buffer3, LEFT_MODE);
@@ -329,5 +327,4 @@ int main() {
         lcd.DisplayStringAt(x, 110, (uint8_t *)buffer5, LEFT_MODE);
         lcd.DisplayStringAt(x, 135, (uint8_t *)buffer6, LEFT_MODE);
     }
-
 }
